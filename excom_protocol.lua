@@ -31,6 +31,8 @@ for _, proto_field in pairs(fields) do
     table.insert(excom_proto.fields, proto_field)
 end
 
+local server_port = 9000
+
 -- Dissector callback, called for each packet
 excom_proto.dissector = function(buf, pinfo, root)
     -- arguments:
@@ -49,11 +51,16 @@ excom_proto.dissector = function(buf, pinfo, root)
     local id_buf = buf(0, 4)
     tree:add_le(fields.id, id_buf)
 
-    -- request_t
-    local type_data = buf(4, 1)
-    tree:add_le(fields.type, type_data)
+    if pinfo.dst_port == server_port then
+        -- request_t
+        local type_data = buf(4, 1)
+        tree:add_le(fields.type, type_data)
+    else
+        -- response_t
+        tree:add_le(fields.status, buf(4, 1))
+    end
 end
 
 -- Register our protocol to be automatically used for traffic on port 9000
 local tcp_port = DissectorTable.get('tcp.port')
-tcp_port:add(9000, excom_proto)
+tcp_port:add(server_port, excom_proto)
