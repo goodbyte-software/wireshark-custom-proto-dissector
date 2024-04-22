@@ -14,3 +14,7 @@ client:
 server:
     gcc {{CFLAGS}} excom_server.c -o excom_server.elf
     socat -x TCP-LISTEN:{{PORT}},reuseaddr,fork EXEC:./excom_server.elf
+
+# Start wireshark
+wireshark:
+    wireshark -X lua_script:./excom_protocol.lua -k -i lo -f 'port {{PORT}}'
