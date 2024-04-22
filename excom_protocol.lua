@@ -30,6 +30,10 @@ local fields = {
     -- led_request_t
     led_id = ProtoField.uint16(field('led.id'), 'LED ID', base.DEC),
     led_state = ProtoField.bool(field('led.state'), 'LED state'),
+
+    -- special fields to provide information about matching request/response
+    request = ProtoField.framenum(field('request'), 'Request', base.NONE, frametype.REQUEST),
+    response = ProtoField.framenum(field('response'), 'Response', base.NONE, frametype.RESPONSE),
 }
 
 -- Add all the types to Proto.fields list
@@ -37,7 +41,14 @@ for _, proto_field in pairs(fields) do
     table.insert(excom_proto.fields, proto_field)
 end
 
+-- TCP port on which to dissect our protocol
 local server_port = 9000
+
+-- Mappings of request/response ID to frame numbers
+local id2frame = {
+    request = {}, -- request id -> request frame number
+    response = {}, -- response id -> response frame number
+}
 
 -- Dissector callback, called for each packet
 excom_proto.dissector = function(buf, pinfo, root)
@@ -56,6 +67,7 @@ excom_proto.dissector = function(buf, pinfo, root)
     -- `id` is of type uint32_t, so get a sub-slice: buf(offset=0, length=4)
     local id_buf = buf(0, 4)
     tree:add_le(fields.id, id_buf)
+    local id = id_buf:uint()
 
     if pinfo.dst_port == server_port then
         -- request_t
@@ -74,9 +86,26 @@ excom_proto.dissector = function(buf, pinfo, root)
             tree:add_le(fields.led_id, buf(5, 2))
             tree:add_le(fields.led_state, buf(7, 1))
         end
+
+        -- On first dissection run (pinfo.visited=false) store mapping from request id to frame number
+        if not pinfo.visited then
+            id2frame.request[id_buf:uint()] = pinfo.number
+        end
+
+        -- If possible add information about matching response
+        if id2frame.response[id] then
+            tree:add_le(fields.response, id2frame.response[id])
+        end
     else
         -- response_t
         tree:add_le(fields.status, buf(4, 1))
+
+        if not pinfo.visited then
+            id2frame.response[id_buf:uint()] = pinfo.number
+        end
+        if id2frame.request[id] then
+            tree:add_le(fields.request, id2frame.request[id])
+        end
     end
 end
 
