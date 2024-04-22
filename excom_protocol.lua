@@ -50,6 +50,44 @@ local id2frame = {
     response = {}, -- response id -> response frame number
 }
 
+-- Helper function for taking message data from buffer and configuring pinfo in case we need more data
+local function msg_consumer(buf, pinfo)
+    local obj = {
+        msg_offset = 0, -- offset in buf to start of the current message
+        msg_taken = 0, -- number of bytes consumed from current message
+        not_enough = false,
+    }
+
+    obj.next_msg = function()
+        obj.msg_offset = obj.msg_offset + obj.msg_taken
+        obj.msg_taken = 0
+    end
+
+    obj.take_next = function(n)
+        if obj.not_enough then -- subsequent calls
+            return
+        end
+
+        -- If not enough data in the buffer then wait for next packet with correct offset
+        if buf:len() - (obj.msg_offset + obj.msg_taken) < n then
+            pinfo.desegment_offset = obj.msg_offset
+            pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
+            obj.not_enough = true
+            return
+        end
+
+        local data = buf:range(obj.msg_offset + obj.msg_taken, n)
+        obj.msg_taken = obj.msg_taken + n
+        return data
+    end
+
+    obj.current_msg_buf = function()
+        return buf:range(obj.msg_offset, obj.msg_taken)
+    end
+
+    return obj
+end
+
 -- Dissector callback, called for each packet
 excom_proto.dissector = function(buf, pinfo, root)
     -- arguments:
@@ -60,51 +98,83 @@ excom_proto.dissector = function(buf, pinfo, root)
     -- Set name of the protocol
     pinfo.cols.protocol:set(excom_proto.name)
 
-    -- Add new tree node for our protocol details
-    local tree = root:add(excom_proto, buf())
+    -- Construct TCP reassembly helper
+    local consumer = msg_consumer(buf, pinfo)
 
-    -- Extract message ID, this is the same for request_t and response_t
-    -- `id` is of type uint32_t, so get a sub-slice: buf(offset=0, length=4)
-    local id_buf = buf(0, 4)
-    tree:add_le(fields.id, id_buf)
-    local id = id_buf:uint()
+    -- TCP reasasembly - loop through all messages in the packet
+    while true do
+        consumer.next_msg()
 
-    if pinfo.dst_port == server_port then
-        -- request_t
-        local type_data = buf(4, 1)
-        tree:add_le(fields.type, type_data)
+        -- Deferred adding of tree fields
+        local tree_add = {}
 
-        -- request_data_t depending on the `type` field
-        local type = type_data:le_uint()
-        if type == request_type.REQ_DISPLAY then
-            -- display_request_t
-            local len_buf = buf(5, 4)
-            tree:add_le(fields.display_text_length, len_buf)
-            tree:add_le(fields.display_text, buf(9, len_buf:le_uint()))
-        elseif type == request_type.REQ_LED then
-            -- led_request_t
-            tree:add_le(fields.led_id, buf(5, 2))
-            tree:add_le(fields.led_state, buf(7, 1))
+        -- Extract request/response ID
+        local id_buf = consumer.take_next(4)
+        if not id_buf then
+            return -- not enough data, take_next has configured pinfo to request more data
         end
 
-        -- On first dissection run (pinfo.visited=false) store mapping from request id to frame number
-        if not pinfo.visited then
-            id2frame.request[id_buf:uint()] = pinfo.number
+        table.insert(tree_add, {fields.id, id_buf})
+        local id = id_buf:uint()
+
+        -- Distinguish request/response
+        if pinfo.dst_port == server_port then
+            -- request_t
+            local type_buf = consumer.take_next(1)
+            if not type_buf then
+                return
+            end
+
+            table.insert(tree_add, {fields.type, type_buf})
+
+            -- request_data_t depending on the `type` field
+            local type = type_buf:le_uint()
+            if type == request_type.REQ_DISPLAY then
+                -- display_request_t
+                local len_buf = consumer.take_next(4)
+                local text_buf = len_buf and consumer.take_next(len_buf:le_uint())
+                if not text_buf then
+                    return
+                end
+                table.insert(tree_add, {fields.display_text_length, len_buf})
+                table.insert(tree_add, {fields.display_text, text_buf})
+            elseif type == request_type.REQ_LED then
+                -- led_request_t
+                local id_buf = consumer.take_next(2)
+                local state_buf = consumer.take_next(1)
+                if not state_buf then
+                    return
+                end
+                table.insert(tree_add, {fields.led_id, id_buf})
+                table.insert(tree_add, {fields.led_state, state_buf})
+            end
+
+            -- On first dissection run (pinfo.visited=false) store mapping from request id to frame number
+            if not pinfo.visited then
+                id2frame.request[id_buf:uint()] = pinfo.number
+            end
+
+            -- If possible add information about matching response
+            if id2frame.response[id] then
+                table.insert(tree_add, {fields.response, id2frame.response[id]})
+            end
+        else
+            -- response_t
+            local status_buf = consumer.take_next(1)
+            table.insert(tree_add, {fields.status, status_buf})
+
+            if not pinfo.visited then
+                id2frame.response[id_buf:uint()] = pinfo.number
+            end
+            if id2frame.request[id] then
+                table.insert(tree_add, {fields.request, id2frame.request[id]})
+            end
         end
 
-        -- If possible add information about matching response
-        if id2frame.response[id] then
-            tree:add_le(fields.response, id2frame.response[id])
-        end
-    else
-        -- response_t
-        tree:add_le(fields.status, buf(4, 1))
-
-        if not pinfo.visited then
-            id2frame.response[id_buf:uint()] = pinfo.number
-        end
-        if id2frame.request[id] then
-            tree:add_le(fields.request, id2frame.request[id])
+        -- Add tree node for this message only if we reached this place
+        local tree = root:add(excom_proto, consumer.current_msg_buf())
+        for _, to_add in ipairs(tree_add) do
+            tree:add_le(to_add[1], to_add[2])
         end
     end
 end
