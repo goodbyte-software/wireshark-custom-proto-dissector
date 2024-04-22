@@ -23,6 +23,21 @@ void respond(int fd, uint32_t id, bool status)
     ASSERT(ec >= 0, "ec=%d\n", ec);
 }
 
+int read_exact(int fd, void *buf, size_t nbytes)
+{
+    size_t nread = 0;
+    while (nread < nbytes) {
+        int ec = read(fd, ((uint8_t *) buf) + nread,  nbytes - nread);
+        if (ec == 0) {
+            ASSERT(nread == 0, "nread=%zu\n", nread);
+            return ec;
+        }
+        ASSERT(ec > 0, "ec=%d\n", ec);
+        nread += ec;
+    }
+    return nread;
+}
+
 int main()
 {
     // Use STDIN/STDOUT in binary mode
@@ -37,20 +52,19 @@ int main()
 
     while (true) {
         uint8_t *buf = req_buf;
-        int ec = read(in_fd, buf, REQUEST_BASE_SIZE);
+        int ec = read_exact(in_fd, buf, REQUEST_BASE_SIZE);
         if (ec == 0) { // EOF
             break;
         }
         buf += ec;
 
-
         switch (req->type) {
             case REQ_DISPLAY: {
-                ec = read(in_fd, buf, sizeof(req->data.display.text_length));
+                ec = read_exact(in_fd, buf, sizeof(req->data.display.text_length));
                 ASSERT(ec == sizeof(req->data.display.text_length), "ec=%d\n", ec);
                 buf += ec;
 
-                ec = read(in_fd, buf, req->data.display.text_length);
+                ec = read_exact(in_fd, buf, req->data.display.text_length);
                 ASSERT(ec == req->data.display.text_length, "ec=%d\n", ec);
 
                 respond(out_fd, req->id, ok_after == 0);
@@ -59,7 +73,7 @@ int main()
                 break;
             }
             case REQ_LED: {
-                ec = read(in_fd, buf, sizeof(req->data.led));
+                ec = read_exact(in_fd, buf, sizeof(req->data.led));
                 ASSERT(ec == sizeof(req->data.led), "ec=%d\n", ec);
 
                 respond(out_fd, req->id, ok_after == 0);
