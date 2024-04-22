@@ -24,6 +24,12 @@ local fields = {
     type = ProtoField.uint8(field('type'), 'Request type', base.HEX, request_type_names),
     -- response_t
     status = ProtoField.bool(field('status'), 'Response status'),
+    -- display_request_t
+    display_text_length = ProtoField.uint32(field('display.text_length'), 'Text length', base.DEC),
+    display_text = ProtoField.string(field('display.text'), 'Text', base.ASCII),
+    -- led_request_t
+    led_id = ProtoField.uint16(field('led.id'), 'LED ID', base.DEC),
+    led_state = ProtoField.bool(field('led.state'), 'LED state'),
 }
 
 -- Add all the types to Proto.fields list
@@ -55,6 +61,19 @@ excom_proto.dissector = function(buf, pinfo, root)
         -- request_t
         local type_data = buf(4, 1)
         tree:add_le(fields.type, type_data)
+
+        -- request_data_t depending on the `type` field
+        local type = type_data:le_uint()
+        if type == request_type.REQ_DISPLAY then
+            -- display_request_t
+            local len_buf = buf(5, 4)
+            tree:add_le(fields.display_text_length, len_buf)
+            tree:add_le(fields.display_text, buf(9, len_buf:le_uint()))
+        elseif type == request_type.REQ_LED then
+            -- led_request_t
+            tree:add_le(fields.led_id, buf(5, 2))
+            tree:add_le(fields.led_state, buf(7, 1))
+        end
     else
         -- response_t
         tree:add_le(fields.status, buf(4, 1))
